@@ -1,5 +1,6 @@
 
 import yfinance as yf
+import pandas_ta as ta
 import os
 from dotenv import load_dotenv
 from google import genai
@@ -13,19 +14,31 @@ gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 grok_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
-symbol = input("Enter Stock Symbol: ").upper()
+symbol = input("Enter Stock Symbol (e.g. RELIANCE.NS): ").upper()
 stock = yf.Ticker(symbol)
 
-if stock.history(period="5d").empty:
-    print("❌ Invalid Stock Symbol")
+history = stock.history(period="1y")
+
+if history.empty:
+    print("❌ Invalid Stock Symbol or no market data available")
     exit()
+
+
 
 info = stock.info
 
-stock_data = {
+market_details = {
     "symbol": symbol,
-    "company_name": info.get("longName"),
     "current_price": stock.fast_info.get("lastPrice"),
+    "52_week_high": info.get("fiftyTwoWeekHigh"),
+    "52_week_low": info.get("fiftyTwoWeekLow"),
+    "50_day_average": info.get("fiftyDayAverage"),
+    "200_day_average": info.get("twoHundredDayAverage"),
+    "history": stock.history(period="1y"),}
+
+
+fundamental_details = {
+    "company_name": info.get("longName"),
     "market_cap": info.get("marketCap"),
     "pe_ratio": info.get("trailingPE"),
     "forward_pe": info.get("forwardPE"),
@@ -47,122 +60,246 @@ stock_data = {
     "current_ratio": info.get("currentRatio"),
     "dividend_yield": info.get("dividendYield"),
     "sector": info.get("sector"),
-    "industry": info.get("industry"),
-    "52_week_high": info.get("fiftyTwoWeekHigh"),
-    "52_week_low": info.get("fiftyTwoWeekLow"),
-    "50_day_average": info.get("fiftyDayAverage"),
-    "200_day_average": info.get("twoHundredDayAverage"),
+    "industry": info.get("industry"),}
+
+
+technical_details = {
+    "rsi": ta.rsi(history["Close"], length=14).iloc[-1],
+
+    "macd": ta.macd(history["Close"])["MACD_12_26_9"].iloc[-1],
+
+    "macd_signal": ta.macd(history["Close"])["MACDs_12_26_9"].iloc[-1],
+
+    "sma_20": history["Close"].rolling(20).mean().iloc[-1],
+
+    "sma_50": history["Close"].rolling(50).mean().iloc[-1],
+
+    "sma_200": history["Close"].rolling(200).mean().iloc[-1],
+
+    "volume_ratio": (
+        history["Volume"].iloc[-1] /
+        history["Volume"].rolling(20).mean().iloc[-1]
+    ),
+
+    "return_1m": history["Close"].pct_change(22).iloc[-1] * 100,
+
+    "return_3m": history["Close"].pct_change(66).iloc[-1] * 100,
+
+    "return_6m": history["Close"].pct_change(132).iloc[-1] * 100,
+
+    "atr": ta.atr(
+        history["High"],
+        history["Low"],
+        history["Close"],
+        length=14
+    ).iloc[-1],
 }
 
 
 gemini_response =gemini_client.models.generate_content(
     model="gemini-3.5-flash",
-    contents=f"""You are a professional stock-analysis scoring engine.
+    contents=f"""
+You are a stock analysis scoring engine.
 
-Analyze the stock data I provide and give a 0–10 score for the strength of the stock's potential to move UP over the specified timeframe.
+Your task is to evaluate the bullish strength of the stock based ONLY on the data provided below.
 
-Evaluate BOTH:
+The goal is to estimate how strong the evidence is that the stock can move upward over the specified timeframe.
 
-TECHNICALS
-- Trend, momentum, RSI, MACD
-- Moving averages
-- Volume
-- Support/resistance
-- Breakouts/breakdowns
-- Volatility and relative strength
+TIMEFRAME:
+Short-to-medium term: approximately 1–3 months.
 
-COMPANY & FUNDAMENTALS
-- What the company does and its business model
-- Industry/sector and industry outlook
-- Market position and competitive advantages
-- Brand/reputation and management, if provided
-- Revenue, earnings, margins, cash flow, debt and valuation
-- Growth potential
-- Competitive environment
-- Catalysts, news and major risks
+DATA:
 
-IMPORTANT:
-- Judge the company according to its specific industry and business type.
-- Combine all signals rather than relying on one indicator.
-- Penalize conflicting signals, weak confirmation, poor fundamentals, excessive valuation and major risks.
-- Consider the specified timeframe.
-- Do not invent missing information; lower confidence when important data is missing.
-- Do all analysis internally.
+FUNDAMENTAL DETAILS:
+{fundamental_details}
+
+MARKET DETAILS:
+{market_details}
+
+TECHNICAL DETAILS:
+{technical_details}
+
+ANALYSIS RULES:
+
+1. FUNDAMENTALS
+Evaluate:
+- Revenue and profitability
+- EPS
+- Profit and operating margins
+- ROE and ROA
+- Debt, cash and debt-to-equity
+- Operating cash flow and free cash flow
+- Current ratio
+- Valuation using P/E, forward P/E, PEG, price-to-book and price-to-sales
+- Sector and industry
+
+2. TECHNICALS
+Evaluate:
+- RSI
+- MACD, MACD signal and MACD histogram
+- 20/50/200-day moving averages
+- Current price relative to moving averages
+- Volume and volume ratio
+- 1-month, 3-month and 6-month returns
+- ATR and volatility
+- 52-week high/low position
+- Support and resistance
+
+3. MARKET CONDITION
+Evaluate:
+- Current price trend
+- Momentum
+- Volume confirmation
+- Trend alignment between moving averages
+- Strength or weakness of recent price movement
 
 SCORING:
-0/10 = Extremely bearish
-5/10 = Neutral/uncertain
-10/10 = Extremely bullish
 
-Your score represents the overall bullish strength after considering technicals + company + industry + fundamentals + risks.
-hee is the stock data={stock_data}
+0–2 = Extremely bearish
+3–4 = Bearish
+5 = Neutral / mixed
+6–7 = Moderately bullish
+8–9 = Strongly bullish
+10 = Extremely bullish
+
+IMPORTANT RULES:
+
+- Use ONLY the information provided.
+- Do NOT invent missing values, news, catalysts, events or company information.
+- Do NOT calculate technical indicators yourself. The technical indicators have already been calculated.
+- Treat missing or None values as unavailable information.
+- Do not assume that a high score in one category automatically means the stock is bullish.
+- Consider all available signals together.
+- Penalize conflicting signals.
+- Penalize excessive valuation.
+- Penalize weak fundamentals.
+- Penalize deteriorating momentum or bearish technical structure.
+- Strong fundamentals alone should not produce a high short-term score if technicals are strongly bearish.
+- Strong technicals alone should not produce a high score if fundamentals show major weaknesses.
+- Give more importance to technical and market conditions for the 1–3 month timeframe, while still considering fundamentals.
+- Do not use outside knowledge.
+- Do not make a buy, sell, or hold recommendation.
+- Return exactly ONE integer score from 0 to 10.
+
 FINAL RESPONSE:
-Reply with ONLY:
+Return ONLY the number.
 
+Example:
+8
 
-x/10
-
-No explanation, no reasoning, no percentage, no buy/sell/hold recommendation, and no additional text.
-just th score like this x/10"""
+No explanation.
+No reasoning.
+No percentage.
+No /10.
+No additional text.
+"""
 )
 
 grok_response = grok_client.chat.completions.create(
     model="openai/gpt-oss-120b",
     messages=[{
         "role": "user",
-        "content": f"""You are a professional stock-analysis scoring engine.
+        "content": f"""
+You are a stock analysis scoring engine.
 
-Analyze the stock data I provide and give a 0–10 score for the strength of the stock's potential to move UP over the specified timeframe.
+Your task is to evaluate the bullish strength of the stock based ONLY on the data provided below.
 
-Evaluate BOTH:
+The goal is to estimate how strong the evidence is that the stock can move upward over the specified timeframe.
 
-TECHNICALS
-- Trend, momentum, RSI, MACD
-- Moving averages
-- Volume
-- Support/resistance
-- Breakouts/breakdowns
-- Volatility and relative strength
+TIMEFRAME:
+Short-to-medium term: approximately 1–3 months.
 
-COMPANY & FUNDAMENTALS
-- What the company does and its business model
-- Industry/sector and industry outlook
-- Market position and competitive advantages
-- Brand/reputation and management, if provided
-- Revenue, earnings, margins, cash flow, debt and valuation
-- Growth potential
-- Competitive environment
-- Catalysts, news and major risks
+DATA:
 
-IMPORTANT:
-- Judge the company according to its specific industry and business type.
-- Combine all signals rather than relying on one indicator.
-- Penalize conflicting signals, weak confirmation, poor fundamentals, excessive valuation and major risks.
-- Consider the specified timeframe.
-- Do not invent missing information; lower confidence when important data is missing.
-- Do all analysis internally.
+FUNDAMENTAL DETAILS:
+{fundamental_details}
+
+MARKET DETAILS:
+{market_details}
+
+TECHNICAL DETAILS:
+{technical_details}
+
+ANALYSIS RULES:
+
+1. FUNDAMENTALS
+Evaluate:
+- Revenue and profitability
+- EPS
+- Profit and operating margins
+- ROE and ROA
+- Debt, cash and debt-to-equity
+- Operating cash flow and free cash flow
+- Current ratio
+- Valuation using P/E, forward P/E, PEG, price-to-book and price-to-sales
+- Sector and industry
+
+2. TECHNICALS
+Evaluate:
+- RSI
+- MACD, MACD signal and MACD histogram
+- 20/50/200-day moving averages
+- Current price relative to moving averages
+- Volume and volume ratio
+- 1-month, 3-month and 6-month returns
+- ATR and volatility
+- 52-week high/low position
+- Support and resistance
+
+3. MARKET CONDITION
+Evaluate:
+- Current price trend
+- Momentum
+- Volume confirmation
+- Trend alignment between moving averages
+- Strength or weakness of recent price movement
 
 SCORING:
-0/10 = Extremely bearish
-5/10 = Neutral/uncertain
-10/10 = Extremely bullish
 
-Your score represents the overall bullish strength after considering technicals + company + industry + fundamentals + risks.
-hee is the stock data={stock_data}
+0–2 = Extremely bearish
+3–4 = Bearish
+5 = Neutral / mixed
+6–7 = Moderately bullish
+8–9 = Strongly bullish
+10 = Extremely bullish
+
+IMPORTANT RULES:
+
+- Use ONLY the information provided.
+- Do NOT invent missing values, news, catalysts, events or company information.
+- Do NOT calculate technical indicators yourself. The technical indicators have already been calculated.
+- Treat missing or None values as unavailable information.
+- Do not assume that a high score in one category automatically means the stock is bullish.
+- Consider all available signals together.
+- Penalize conflicting signals.
+- Penalize excessive valuation.
+- Penalize weak fundamentals.
+- Penalize deteriorating momentum or bearish technical structure.
+- Strong fundamentals alone should not produce a high short-term score if technicals are strongly bearish.
+- Strong technicals alone should not produce a high score if fundamentals show major weaknesses.
+- Give more importance to technical and market conditions for the 1–3 month timeframe, while still considering fundamentals.
+- Do not use outside knowledge.
+- Do not make a buy, sell, or hold recommendation.
+- Return exactly ONE integer score from 0 to 10.
+
 FINAL RESPONSE:
-Reply with ONLY:
+Return ONLY the number.
 
+Example:
+8
 
-x/10
-
-No explanation, no reasoning, no percentage, no buy/sell/hold recommendation, and no additional text.
-just th score like this x/10"""
+No explanation.
+No reasoning.
+No percentage.
+No /10.
+No additional text.
+"""
     }]
 )
 gemini_text = gemini_response.text
 grok_text = grok_response.choices[0].message.content
-gemini_score = int(gemini_text.split("/")[0].strip())
-grok_score = int(grok_text.split("/")[0].strip())
+gemini_score = int(gemini_text)
+grok_score = int(grok_text)
 print("*"*20)
 print("Gemini:", gemini_text)
 print("*"*20)
